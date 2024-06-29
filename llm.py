@@ -1,3 +1,5 @@
+import logging
+from typing import Dict
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, FewShotChatMessagePromptTemplate
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
@@ -5,16 +7,16 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
-
 from config import answer_examples
 
 # In-memory store for session histories
-store = {}
+store: Dict[str, BaseChatMessageHistory] = {}
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
     """Retrieve or create a chat message history for a given session ID."""
@@ -22,16 +24,24 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
         store[session_id] = ChatMessageHistory()
     return store[session_id]
 
-
-def get_retriever():
+def get_retriever() -> PineconeVectorStore:
     """Create a retriever using OpenAI embeddings and Pinecone vector store."""
-    embedding = OpenAIEmbeddings(model='text-embedding-3-large')
-    index_name = 'tax-markdown-index'
-    database = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embedding)
-    retriever = database.as_retriever(search_kwargs={'k': 4})
-    return retriever
+    try:
+        # Initialize OpenAI embeddings
+        embedding = OpenAIEmbeddings(model='text-embedding-3-large')
+        index_name = 'tax-markdown-index'
+        
+        # Create Pinecone vector store from existing index
+        database = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embedding)
+        
+        # Create retriever with specific search parameters
+        retriever = database.as_retriever(search_kwargs={'k': 4})
+        return retriever
+    except Exception as e:
+        logging.error(f"Error creating retriever: {e}")
+        raise
 
-def get_history_retriever():
+def get_history_retriever() -> create_history_aware_retriever:
     """Create a history-aware retriever that can contextualize questions based on chat history."""
     llm = get_llm()
     retriever = get_retriever()
@@ -44,7 +54,7 @@ def get_history_retriever():
         "without the chat history. Do NOT answer the question, "
         "just reformulate it if needed and otherwise return it as is."
     )
-
+    
     # Prompt template for contextualizing questions
     contextualize_q_prompt = ChatPromptTemplate.from_messages(
         [
@@ -60,14 +70,11 @@ def get_history_retriever():
     )
     return history_aware_retriever
 
-
-def get_llm(model='gpt-4o'):
+def get_llm(model: str = 'gpt-4o') -> ChatOpenAI:
     """Instantiate a language model."""
-    llm = ChatOpenAI(model=model)
-    return llm
+    return ChatOpenAI(model=model)
 
-
-def get_dictionary_chain():
+def get_dictionary_chain() -> StrOutputParser:
     """Create a chain that uses a dictionary to modify user questions."""
     dictionary = ["사람을 나타내는 표현 -> 거주자"]
     llm = get_llm()
@@ -81,14 +88,12 @@ def get_dictionary_chain():
         
         질문: {{question}}
     """)
-
+    
     # Create a chain that processes the prompt and parses the output
     dictionary_chain = prompt | llm | StrOutputParser()
-    
     return dictionary_chain
 
-
-def get_rag_chain():
+def get_rag_chain() -> RunnableWithMessageHistory:
     """Create a retrieval-augmented generation (RAG) chain for answering questions."""
     llm = get_llm()
     
@@ -132,7 +137,7 @@ def get_rag_chain():
     
     # Create a question-answering chain
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-
+    
     # Create a retrieval-augmented generation (RAG) chain
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
     
@@ -147,23 +152,26 @@ def get_rag_chain():
     
     return conversational_rag_chain
 
-
-def get_ai_response(user_message):
+def get_ai_response(user_message: str) -> str:
     """Generate an AI response to a user message using dictionary and RAG chains."""
-    dictionary_chain = get_dictionary_chain()
-    rag_chain = get_rag_chain()
-    
-    # Combine dictionary chain and RAG chain
-    tax_chain = {"input": dictionary_chain} | rag_chain
-    
-    # Stream the AI response
-    ai_response = tax_chain.stream(
-        {
-            "question": user_message
-        },
-        config={
-            "configurable": {"session_id": "abc123"}
-        },
-    )
-
-    return ai_response
+    try:
+        # Get dictionary chain and RAG chain
+        dictionary_chain = get_dictionary_chain()
+        rag_chain = get_rag_chain()
+        
+        # Combine dictionary chain and RAG chain
+        tax_chain = {"input": dictionary_chain} | rag_chain
+        
+        # Stream the AI response
+        ai_response = tax_chain.stream(
+            {
+                "question": user_message
+            },
+            config={
+                "configurable": {"session_id": "abc123"}
+            },
+        )
+        return ai_response
+    except Exception as e:
+        logging.error(f"Error generating AI response: {e}")
+        return "An error occurred while processing your request."
